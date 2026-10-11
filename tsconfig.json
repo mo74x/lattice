@@ -1,0 +1,20 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "declaration": true,
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "baseUrl": ".",
+    "paths": {
+      "@lattice/canonical": ["./libs/canonical/src/index.ts"],
+      "@lattice/canonical/*": ["./libs/canonical/src/*"],
+      "@lattice/adapters": ["./libs/adapters/src/index.ts"],
+      "@lattice/adapters/*": ["./libs/adapters/src/*"],
+      "@lattice/sync-core": ["./libs/sync-core/src/index.ts"],
+      "@lattice/sync-core/*": ["./libs/sync-core/src/*"]
+    }
+  }
+}

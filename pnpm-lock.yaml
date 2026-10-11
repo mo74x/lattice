@@ -52,6 +52,16 @@ importers:
         specifier: ^5.5.4
         version: 5.9.3
 
+  libs/adapters:
+    dependencies:
+      '@lattice/canonical':
+        specifier: workspace:*
+        version: link:../canonical
+    devDependencies:
+      typescript:
+        specifier: ^5.5.4
+        version: 5.9.3
+
   libs/canonical:
     dependencies:
       zod:
