@@ -3,9 +3,11 @@ packages:
   - 'libs/*'
 
 allowBuilds:
+  '@nestjs/core': true
   '@parcel/watcher': true
   '@prisma/engines': true
   esbuild: true
+  msgpackr-extract: true
   prisma: true
   unrs-resolver: true
   workerd: true
