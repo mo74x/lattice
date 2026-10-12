@@ -1,0 +1,74 @@
+name: Lattice Engine CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: lattice_user
+          POSTGRES_PASSWORD: lattice_password
+          POSTGRES_DB: lattice_db
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+
+      redis:
+        image: redis:7-alpine
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 6379:6379
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'pnpm'
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v3
+        with:
+          version: 9
+
+      - name: Install Dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Generate Prisma Client & Run Migrations
+        env:
+          DATABASE_URL: "postgresql://lattice_user:lattice_password@localhost:5432/lattice_db?schema=public"
+        run: |
+          npx prisma migrate dev
+
+      - name: Type Check & Lint
+        run: pnpm run build
+
+      - name: Run Unit & Integration Tests
+        env:
+          DATABASE_URL: "postgresql://lattice_user:lattice_password@localhost:5432/lattice_db?schema=public"
+          REDIS_HOST: "localhost"
+          REDIS_PORT: 6379
+        run: pnpm run test
+
+      - name: Run 200-Way Concurrency Overlap Test
+        env:
+          DATABASE_URL: "postgresql://lattice_user:lattice_password@localhost:5432/lattice_db?schema=public"
+        run: npx jest apps/api/test/concurrency-overlap.spec.ts
