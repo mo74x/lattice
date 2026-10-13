@@ -3,6 +3,7 @@ import { PrismaClient } from '@prisma/client';
 import { InjectQueue } from '@nestjs/bullmq';
 import { Queue } from 'bullmq';
 import { AdapterRegistry } from '@lattice/adapters';
+import Redis from 'ioredis';
 import {
   webhooksReceivedTotal,
   webhookDuplicatesTotal,
@@ -16,7 +17,8 @@ export class WebhookService {
   constructor(
     private readonly prisma: PrismaClient,
     private readonly adapterRegistry: AdapterRegistry,
-    @InjectQueue('inbound-webhooks') private readonly inboundQueue: Queue
+    @InjectQueue('inbound-webhooks') private readonly inboundQueue: Queue,
+    private readonly redisClient: Redis
   ) {}
 
   async handleIncomingWebhook(
@@ -40,8 +42,24 @@ export class WebhookService {
 
     const adapter = this.adapterRegistry.get(connection.provider);
 
-    // Constant-time cryptographic verification
-    const isValid = adapter.verifyWebhook(headers, rawBody, connection.webhookSecret);
+    // 1. Constant-time cryptographic verification with active primary secret
+    let isValid = adapter.verifyWebhook(headers, rawBody, connection.webhookSecret);
+
+    // 2. Zero-downtime dual-secret fallback: check previous secret if within active grace window
+    if (!isValid) {
+      const prevSecret = await this.redisClient.get(
+        `lattice:connection:${connectionId}:prev_secret`
+      );
+      if (prevSecret) {
+        isValid = adapter.verifyWebhook(headers, rawBody, prevSecret);
+        if (isValid) {
+          this.logger.warn(
+            `Webhook verified using previous secret within grace period for connection ${connectionId}. Partner should migrate to new secret.`
+          );
+        }
+      }
+    }
+
     if (!isValid) {
       webhooksReceivedTotal.inc({ provider: connection.provider, valid: 'false' });
       this.logger.warn(`Rejected invalid webhook signature on connection ${connectionId}`);

@@ -1,8 +1,10 @@
-import { Controller, Post, Get, Param, Query, HttpCode, HttpStatus, ParseBoolPipe } from '@nestjs/common';
+import { Controller, Post, Get, Param, Query, HttpCode, HttpStatus, ParseBoolPipe, UseGuards } from '@nestjs/common';
 import { ReconciliationService } from './reconciliation.service';
 import { PrismaClient } from '@prisma/client';
+import { AdminApiKeyGuard } from '../auth/admin-api-key.guard';
 
 @Controller('admin/reconciliation')
+@UseGuards(AdminApiKeyGuard)
 export class ReconciliationController {
   constructor(
     private readonly reconciliationService: ReconciliationService,

@@ -11,6 +11,9 @@ import { ReconciliationController } from './reconciliation/reconciliation.contro
 import { ReconciliationService } from './reconciliation/reconciliation.service';
 import { DlqController } from './dlq/dlq.controller';
 import { DlqService } from './dlq/dlq.service';
+import { SecretRotationController } from './auth/secret-rotation.controller';
+import { SecretRotationService } from './auth/secret-rotation.service';
+import { AdminApiKeyGuard } from './auth/admin-api-key.guard';
 
 import { InboundProcessor } from './workers/inbound.processor';
 import { OutboundProcessor } from './workers/outbound.processor';
@@ -39,11 +42,14 @@ import { OutboxRelayService } from './outbox/outbox-relay.service';
     MetricsController,
     ReconciliationController,
     DlqController,
+    SecretRotationController,
   ],
   providers: [
     WebhookService,
     DlqService,
     ReconciliationService,
+    SecretRotationService,
+    AdminApiKeyGuard,
     InboundProcessor,
     OutboundProcessor,
     OutboxRelayService,

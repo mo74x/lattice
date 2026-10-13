@@ -4,6 +4,7 @@ import { PrismaClient } from '@prisma/client';
 import { AdapterRegistry } from '@lattice/adapters';
 import { Queue } from 'bullmq';
 import { UnauthorizedException } from '@nestjs/common';
+import Redis from 'ioredis';
 import * as crypto from 'crypto';
 
 describe('Webhook Ingestion Engine', () => {
@@ -16,14 +17,22 @@ describe('Webhook Ingestion Engine', () => {
   };
 
   const mockQueue = { add: jest.fn() };
+  const mockRedis = {
+    get: jest.fn(),
+    set: jest.fn(),
+  };
 
   beforeEach(async () => {
+    jest.clearAllMocks();
+    mockRedis.get.mockResolvedValue(null);
+
     const module = await Test.createTestingModule({
       providers: [
         WebhookService,
         AdapterRegistry,
         { provide: PrismaClient, useValue: mockPrisma },
         { provide: 'BullQueue_inbound-webhooks', useValue: mockQueue },
+        { provide: Redis, useValue: mockRedis },
       ],
     }).compile();
 
@@ -80,5 +89,78 @@ describe('Webhook Ingestion Engine', () => {
 
     expect(result.status).toBe('deduplicated');
     expect(mockQueue.add).not.toHaveBeenCalled(); // Ensures worker is not spammed
+  });
+
+  it('accepts webhooks signed with previous secret during active grace period', async () => {
+    const previousSecret = 'old_secret_in_grace_period';
+    const activeSecret = 'new_rotated_secret_primary';
+    const timestamp = Math.floor(Date.now() / 1000).toString();
+    const rawPayload = JSON.stringify({ reservation_id: 'res_grace' });
+    const sigWithPrevious = crypto
+      .createHmac('sha256', previousSecret)
+      .update(`${timestamp}.${rawPayload}`)
+      .digest('hex');
+
+    mockPrisma.connection.findUnique.mockResolvedValue({
+      id: 'conn-123',
+      provider: 'cloudbeds_mock',
+      webhookSecret: activeSecret,
+      status: 'ACTIVE',
+      tenantId: 'tenant-1',
+    });
+    mockPrisma.rawEvent.create.mockResolvedValue({});
+
+    // Redis has the previous secret active in grace period
+    mockRedis.get.mockResolvedValue(previousSecret);
+
+    const result = await service.handleIncomingWebhook(
+      'conn-123',
+      {
+        'x-cloudbeds-signature': sigWithPrevious,
+        'x-cloudbeds-timestamp': timestamp,
+        'x-event-id': 'evt_grace_1',
+      },
+      Buffer.from(rawPayload),
+      { reservation_id: 'res_grace' }
+    );
+
+    expect(result.status).toBe('enqueued');
+    expect(mockRedis.get).toHaveBeenCalledWith('lattice:connection:conn-123:prev_secret');
+    expect(mockQueue.add).toHaveBeenCalled();
+  });
+
+  it('rejects webhooks signed with previous secret once grace period has expired', async () => {
+    const previousSecret = 'expired_old_secret';
+    const activeSecret = 'new_rotated_secret_primary';
+    const timestamp = Math.floor(Date.now() / 1000).toString();
+    const rawPayload = JSON.stringify({ reservation_id: 'res_expired' });
+    const sigWithPrevious = crypto
+      .createHmac('sha256', previousSecret)
+      .update(`${timestamp}.${rawPayload}`)
+      .digest('hex');
+
+    mockPrisma.connection.findUnique.mockResolvedValue({
+      id: 'conn-123',
+      provider: 'cloudbeds_mock',
+      webhookSecret: activeSecret,
+      status: 'ACTIVE',
+      tenantId: 'tenant-1',
+    });
+
+    // Redis key expired (returns null)
+    mockRedis.get.mockResolvedValue(null);
+
+    await expect(
+      service.handleIncomingWebhook(
+        'conn-123',
+        {
+          'x-cloudbeds-signature': sigWithPrevious,
+          'x-cloudbeds-timestamp': timestamp,
+          'x-event-id': 'evt_expired_1',
+        },
+        Buffer.from(rawPayload),
+        { reservation_id: 'res_expired' }
+      )
+    ).rejects.toThrow(UnauthorizedException);
   });
 });

@@ -7,10 +7,13 @@ import {
   Body,
   HttpCode,
   HttpStatus,
+  UseGuards,
 } from '@nestjs/common';
 import { DlqService } from './dlq.service';
+import { AdminApiKeyGuard } from '../auth/admin-api-key.guard';
 
 @Controller('admin/dlq')
+@UseGuards(AdminApiKeyGuard)
 export class DlqController {
   constructor(private readonly dlqService: DlqService) {}
 
