@@ -1,4 +1,4 @@
-import { Controller, Post, Param, Req, HttpCode, HttpStatus, Headers } from '@nestjs/common';
+import { Controller, Post, Get, Param, Req, HttpCode, HttpStatus, Headers } from '@nestjs/common';
 import { Request } from 'express';
 import { WebhookService } from './webhook.service';
 
@@ -9,6 +9,11 @@ interface RawBodyRequest extends Request {
 @Controller('webhooks')
 export class WebhookController {
   constructor(private readonly webhookService: WebhookService) {}
+
+  @Get(':connectionId/stats')
+  async getStats(@Param('connectionId') connectionId: string) {
+    return this.webhookService.getConnectionStats(connectionId);
+  }
 
   @Post(':connectionId')
   @HttpCode(HttpStatus.OK)
@@ -24,4 +29,4 @@ export class WebhookController {
       req.body
     );
   }
-}
+}

@@ -4,6 +4,7 @@ import { PrismaClient } from '@prisma/client';
 import { AdapterRegistry } from '@lattice/adapters';
 import { WebhookController } from './webhooks/webhook.controller';
 import { WebhookService } from './webhooks/webhook.service';
+import { MetricsController } from './metrics/metrics.controller';
 
 @Module({
   imports: [
@@ -18,7 +19,7 @@ import { WebhookService } from './webhooks/webhook.service';
       name: 'inbound-webhooks',
     }),
   ],
-  controllers: [WebhookController],
+  controllers: [WebhookController, MetricsController],
   providers: [
     WebhookService,
     {

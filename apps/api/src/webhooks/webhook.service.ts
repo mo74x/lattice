@@ -85,4 +85,25 @@ export class WebhookService {
 
     return { status: 'enqueued', eventId: externalEventId };
   }
-}
+
+  async getConnectionStats(connectionId: string) {
+    const [counts, totalEvents, processedEvents, errorEvents, pendingEvents] = await Promise.all([
+      this.inboundQueue.getJobCounts('waiting', 'active', 'completed', 'failed', 'delayed'),
+      this.prisma.rawEvent.count({ where: { connectionId } }),
+      this.prisma.rawEvent.count({ where: { connectionId, processedAt: { not: null } } }),
+      this.prisma.rawEvent.count({ where: { connectionId, error: { not: null } } }),
+      this.prisma.rawEvent.count({ where: { connectionId, processedAt: null } }),
+    ]);
+
+    return {
+      connectionId,
+      rawEvents: {
+        total: totalEvents,
+        processed: processedEvents,
+        pending: pendingEvents,
+        errors: errorEvents,
+      },
+      queue: counts,
+    };
+  }
+}
