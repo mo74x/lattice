@@ -6,6 +6,7 @@ import { AdapterRegistry } from '@lattice/adapters';
 import { DistributedTokenBucket } from '@lattice/sync-core/rate-limiter';
 import { DistributedCircuitBreaker, CircuitState } from '@lattice/sync-core/circuit-breaker';
 import { computeCanonicalHash } from '@lattice/canonical';
+import { outboxDeadTotal } from '@lattice/sync-core/metrics';
 import Redis from 'ioredis';
 
 export interface OutboundJobPayload {
@@ -119,7 +120,7 @@ export class OutboundProcessor extends WorkerHost {
 
       this.logger.log(`Successfully synced outbox ${outboxId} to partner ${connection.provider}`);
     } catch (err: any) {
-      await this.handleOutboundFailure(outboxId, connectionId, attempts, err);
+      await this.handleOutboundFailure(outboxId, connectionId, connection.provider, attempts, err);
     }
   }
 
@@ -157,6 +158,7 @@ export class OutboundProcessor extends WorkerHost {
   private async handleOutboundFailure(
     outboxId: string,
     connectionId: string,
+    provider: string,
     attempts: number,
     err: any
   ): Promise<void> {
@@ -174,6 +176,7 @@ export class OutboundProcessor extends WorkerHost {
           lastError: err.message,
         },
       });
+      outboxDeadTotal.inc({ provider });
       return;
     }
 

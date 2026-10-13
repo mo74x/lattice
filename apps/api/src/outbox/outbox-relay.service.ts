@@ -2,6 +2,7 @@ import { Injectable, Logger, OnModuleInit, OnModuleDestroy } from '@nestjs/commo
 import { PrismaClient } from '@prisma/client';
 import { InjectQueue } from '@nestjs/bullmq';
 import { Queue } from 'bullmq';
+import { outboxPendingGauge } from '@lattice/sync-core/metrics';
 
 @Injectable()
 export class OutboxRelayService implements OnModuleInit, OnModuleDestroy {
@@ -28,7 +29,13 @@ export class OutboxRelayService implements OnModuleInit, OnModuleDestroy {
     if (!this.isRunning) return;
 
     try {
+      const pendingCount = await this.prisma.outbox.count({
+        where: { status: 'PENDING' },
+      });
+      outboxPendingGauge.set(pendingCount);
+
       await this.prisma.$transaction(async (tx) => {
+
         // High-performance concurrency query:
         // SKIP LOCKED ensures competing worker pods never block each other or fetch duplicate rows.
         const pendingRows = await tx.$queryRaw<any[]>`

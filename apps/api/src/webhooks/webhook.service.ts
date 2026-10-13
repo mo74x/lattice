@@ -3,6 +3,11 @@ import { PrismaClient } from '@prisma/client';
 import { InjectQueue } from '@nestjs/bullmq';
 import { Queue } from 'bullmq';
 import { AdapterRegistry } from '@lattice/adapters';
+import {
+  webhooksReceivedTotal,
+  webhookDuplicatesTotal,
+  webhookIngestDuration,
+} from '@lattice/sync-core/metrics';
 
 @Injectable()
 export class WebhookService {
@@ -20,6 +25,8 @@ export class WebhookService {
     rawBody: Buffer,
     parsedPayload: unknown
   ): Promise<{ status: string; eventId: string }> {
+    const startTime = process.hrtime();
+
     // Fetch connection and adapter
     const connection = await this.prisma.connection.findUnique({
       where: { id: connectionId },
@@ -27,6 +34,7 @@ export class WebhookService {
     });
 
     if (!connection || connection.status !== 'ACTIVE') {
+      webhooksReceivedTotal.inc({ provider: connection?.provider || 'unknown', valid: 'false' });
       throw new BadRequestException('Connection invalid or inactive');
     }
 
@@ -35,9 +43,12 @@ export class WebhookService {
     // Constant-time cryptographic verification
     const isValid = adapter.verifyWebhook(headers, rawBody, connection.webhookSecret);
     if (!isValid) {
+      webhooksReceivedTotal.inc({ provider: connection.provider, valid: 'false' });
       this.logger.warn(`Rejected invalid webhook signature on connection ${connectionId}`);
       throw new UnauthorizedException('Invalid webhook signature');
     }
+
+    webhooksReceivedTotal.inc({ provider: connection.provider, valid: 'true' });
 
     const externalEventId = adapter.extractEventId(parsedPayload, headers);
     const eventTimestamp = adapter.extractTimestamp(parsedPayload, headers);
@@ -57,6 +68,7 @@ export class WebhookService {
     } catch (error: any) {
       // Prisma error P2002: Unique constraint violation on (connectionId, externalEventId)
       if (error.code === 'P2002') {
+        webhookDuplicatesTotal.inc({ provider: connection.provider });
         this.logger.log(`Deduplicated event ${externalEventId} on connection ${connectionId}`);
         return { status: 'deduplicated', eventId: externalEventId };
       }
@@ -83,17 +95,34 @@ export class WebhookService {
       }
     );
 
+    const [seconds, nanoseconds] = process.hrtime(startTime);
+    const durationSeconds = seconds + nanoseconds / 1e9;
+    webhookIngestDuration.observe({ provider: connection.provider }, durationSeconds);
+
     return { status: 'enqueued', eventId: externalEventId };
   }
 
   async getConnectionStats(connectionId: string) {
-    const [counts, totalEvents, processedEvents, errorEvents, pendingEvents] = await Promise.all([
-      this.inboundQueue.getJobCounts('waiting', 'active', 'completed', 'failed', 'delayed'),
-      this.prisma.rawEvent.count({ where: { connectionId } }),
-      this.prisma.rawEvent.count({ where: { connectionId, processedAt: { not: null } } }),
-      this.prisma.rawEvent.count({ where: { connectionId, error: { not: null } } }),
-      this.prisma.rawEvent.count({ where: { connectionId, processedAt: null } }),
-    ]);
+    const [counts, totalEvents, processedEvents, errorEvents, skippedEvents, pendingEvents] =
+      await Promise.all([
+        this.inboundQueue.getJobCounts('waiting', 'active', 'completed', 'failed', 'delayed'),
+        this.prisma.rawEvent.count({ where: { connectionId } }),
+        this.prisma.rawEvent.count({ where: { connectionId, processedAt: { not: null } } }),
+        this.prisma.rawEvent.count({
+          where: {
+            connectionId,
+            error: { not: null },
+            NOT: { error: { startsWith: 'Skipped:' } },
+          },
+        }),
+        this.prisma.rawEvent.count({
+          where: {
+            connectionId,
+            error: { startsWith: 'Skipped:' },
+          },
+        }),
+        this.prisma.rawEvent.count({ where: { connectionId, processedAt: null } }),
+      ]);
 
     return {
       connectionId,
@@ -102,8 +131,9 @@ export class WebhookService {
         processed: processedEvents,
         pending: pendingEvents,
         errors: errorEvents,
+        skipped: skippedEvents,
       },
       queue: counts,
     };
   }
-}
+}
