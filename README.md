@@ -115,16 +115,21 @@ lattice/
 │   ├── api/                        # NestJS application
 │   │   ├── src/
 │   │   │   ├── webhooks/           # Ingestion controller + service
-│   │   │   ├── workers/            # BullMQ inbound processor
+│   │   │   ├── workers/            # BullMQ inbound & outbound processors
 │   │   │   ├── outbox/             # Transactional outbox relay
 │   │   │   ├── reconciliation/     # Self-healing sweep service + admin API
+│   │   │   ├── dlq/                # Dead-letter queue inspection & replay engine
+│   │   │   ├── auth/               # Admin API key guard & secret rotation engine
 │   │   │   ├── metrics/            # Prometheus /metrics endpoint
 │   │   │   ├── app.module.ts       # Root DI module
 │   │   │   └── main.ts             # Bootstrap with raw body parsing
 │   │   └── test/
 │   │       ├── inbound-processor.spec.ts
 │   │       ├── chaos-reconciliation.spec.ts
-│   │       └── concurrency-overlap.spec.ts
+│   │       ├── concurrency-overlap.spec.ts
+│   │       ├── dlq.spec.ts
+│   │       ├── admin-auth.spec.ts
+│   │       └── secret-rotation.spec.ts
 │   └── mock-partners/              # Chaos-injectable partner simulator
 │       └── src/index.ts            # Configurable drop/duplicate/latency/429 rates
 │
@@ -308,6 +313,23 @@ Lattice exposes a dedicated Prometheus metrics endpoint at `GET /metrics`:
 
 Docker Compose includes pre-configured **Prometheus** (scraping every 5s) and **Grafana** (accessible at `localhost:3001`).
 
+### 10. Dead-Letter Queue (DLQ) & Replay Engine
+
+When unrecoverable or terminal errors occur, jobs are routed to dead-letter state rather than silently discarded:
+- **Inbound Failures:** Recorded in the `RawEvent` ledger with `error: <reason>` and visible in the DLQ.
+- **Outbound Failures:** After 5 exponential retry attempts with random full jitter, outbound messages transition to `DEAD` state in the `Outbox` table and increment `lattice_outbox_dead_total`.
+
+**Replay Capabilities:**
+- **Single Replay:** Replay an individual failed inbound event (`POST /admin/dlq/inbound/:id/replay`) or dead outbox row (`POST /admin/dlq/outbound/:id/replay`). State is atomically reset, and the job is re-enqueued into BullMQ with a clean attempt counter.
+- **Bulk Replay:** Batch replay failed inbound events or dead outbox rows filtered by `connectionId`, date range, or error criteria.
+
+### 11. Admin Security & Zero-Downtime Secret Rotation
+
+- **Admin API Key Guard (`AdminApiKeyGuard`):** Protects all administrative surfaces (`/admin/dlq/*`, `/admin/reconciliation/*`, `/admin/connections/*`). Accepts credentials via `X-Admin-Api-Key: <key>` or `Authorization: Bearer <key>` and validates them using constant-time comparison (`crypto.timingSafeEqual`) to eliminate timing side-channel attacks.
+- **Zero-Downtime Webhook Secret Rotation:** When rotating a partner's webhook secret (`POST /admin/connections/:connectionId/rotate-secret`), the old secret is cached in Redis with an exact TTL grace period (default 24h) while the new secret is saved to PostgreSQL.
+- **Dual-Secret Verification Window:** Inbound webhooks are first verified with the active primary secret. If signature verification fails, the engine falls back to checking the previous secret in Redis during the grace period window. Partners can transition webhook signers with zero dropped requests.
+- **Emergency Revocation:** If a previous secret is compromised, `POST /admin/connections/:connectionId/revoke-previous-secret` immediately purges the grace period secret from Redis.
+
 ---
 
 ## Database Schema
@@ -374,6 +396,7 @@ The API will be available at `http://localhost:3000`.
 | `REDIS_PORT` | Redis port | `6379` |
 | `REDIS_PASSWORD` | Redis password | *(empty)* |
 | `ENCRYPTION_KEY` | 32-byte hex key for AES-256-GCM credential encryption | *(required)* |
+| `ADMIN_API_KEY` | Secret key protecting `/admin/*` management routes | `test_admin_api_key_secret_2026` |
 | `PORT` | API listen port | `3000` |
 
 ---
@@ -390,12 +413,18 @@ pnpm run test
 npx jest apps/api/test/inbound-processor.spec.ts
 npx jest apps/api/test/chaos-reconciliation.spec.ts
 npx jest apps/api/test/concurrency-overlap.spec.ts
+npx jest apps/api/test/dlq.spec.ts
+npx jest apps/api/test/admin-auth.spec.ts
+npx jest apps/api/test/secret-rotation.spec.ts
 ```
 
 **Test suites include:**
 - **Inbound Processor** — Echo suppression across all three layers, staleness rejection, valid mutation passthrough
 - **Chaos Reconciliation** — Drift classification, dry-run vs. active healing, blast radius enforcement
 - **Concurrency Overlap** — 200-way parallel booking insertion verifying exclusion constraint enforcement
+- **DLQ & Replay** — Inbound and outbound DLQ summary aggregation, single replay, and bulk replay
+- **Admin Auth** — Constant-time timing-safe API key comparison, header formats (`X-Admin-Api-Key` and `Bearer`), and unauthorized access blocking
+- **Secret Rotation** — Dual-secret grace-period caching in Redis, zero-downtime webhook acceptance, status inspection, and revocation
 
 ### Load Testing
 
@@ -429,12 +458,22 @@ GitHub Actions runs on every push and PR to `main`:
 
 ## API Endpoints
 
-| Method | Path | Description |
-|---|---|---|
-| `POST` | `/webhooks/:connectionId` | Inbound webhook ingestion (partner → Lattice) |
-| `GET` | `/metrics` | Prometheus metrics scrape endpoint |
-| `POST` | `/admin/reconciliation/:connectionId` | Trigger reconciliation sweep |
-| `GET` | `/admin/reconciliation/drift` | Query drift records |
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| `POST` | `/webhooks/:connectionId` | HMAC-SHA256 | Inbound webhook ingestion with dual-secret grace fallback |
+| `GET` | `/webhooks/:connectionId/stats` | None | Connection event and outbox processing stats |
+| `GET` | `/metrics` | None | Prometheus metrics scrape endpoint |
+| `POST` | `/admin/reconciliation/:connectionId` | Admin Key | Trigger self-healing reconciliation sweep (`?dryRun=true`) |
+| `GET` | `/admin/reconciliation/drift` | Admin Key | Query recorded drift instances |
+| `GET` | `/admin/dlq` | Admin Key | Paginated listing of failed inbound events and dead outbox items |
+| `GET` | `/admin/dlq/summary` | Admin Key | Aggregated summary of DLQ and BullMQ queue sizes |
+| `POST` | `/admin/dlq/inbound/:id/replay` | Admin Key | Replay a failed inbound webhook event |
+| `POST` | `/admin/dlq/inbound/bulk-replay` | Admin Key | Bulk replay failed inbound events matching criteria |
+| `POST` | `/admin/dlq/outbound/:id/replay` | Admin Key | Replay a dead outbox message (resets attempts to 0) |
+| `POST` | `/admin/dlq/outbound/bulk-replay` | Admin Key | Bulk replay dead outbox records |
+| `POST` | `/admin/connections/:connectionId/rotate-secret` | Admin Key | Rotate webhook secret with Redis grace-period cache |
+| `GET` | `/admin/connections/:connectionId/secret-status` | Admin Key | Check active rotation status and remaining grace TTL |
+| `POST` | `/admin/connections/:connectionId/revoke-previous-secret` | Admin Key | Immediately revoke previous secret from Redis |
 
 ---
 
